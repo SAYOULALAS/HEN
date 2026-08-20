@@ -1,0 +1,209 @@
+import sympy as sp
+
+# ============================================================
+# Problem size / sets
+# ============================================================
+NI, NJ, NK, NP = 2, 2, 3, 1
+SI, SJ, SK, SP, ST = range(NI), range(NJ), range(NK), range(NP), range(NK - 1)
+
+thin  = [465.0, 410.0]
+thout = [400.0, 310.0]
+fh    = [80.1, 208.53]
+tcin  = [315.0, 315.0]
+tcout = [370.0, 400.0]
+fc    = [126.3, 213.6]
+
+# HP parameters (示例值；请替换为 heatpump2 对应值)
+evap  = [160.0]
+hvap  = [0.0]
+cond  = [160.0]
+chpp  = [0.0]   # cphp
+thpcin = [430.0]
+thpca  = [390.0]
+dhp   = [43.3]
+
+# ============================================================
+# Active binaries from a structure
+# ============================================================
+z_active    = {(0, 1, 0): 1.0,(1, 0, 0): 1.0}
+zhph_active = {(1, 0, 1): 1.0}
+zhpc_active = {(0, 0, 0): 1.0,(1, 0, 1): 1.0}
+zcu_active  = {1: 1.0}
+zhu_active  = {}
+
+
+w_known = {0: None}
+
+# ============================================================
+# Symbolic variables (active only for flow matches)
+# ============================================================
+q = {}
+for i in SI:
+    for j in SJ:
+        for k in ST:
+            q[(i, j, k)] = sp.symbols(f"q_{i}_{j}_{k}") if (i, j, k) in z_active else sp.Integer(0)
+
+qhph = {}
+for i in SI:
+    for p in SP:
+        for k in ST:
+            qhph[(i, p, k)] = sp.symbols(f"qhph_{i}_{p}_{k}") if (i, p, k) in zhph_active else sp.Integer(0)
+
+qhpc = {}
+for j in SJ:
+    for p in SP:
+        for k in ST:
+            qhpc[(j, p, k)] = sp.symbols(f"qhpc_{j}_{p}_{k}") if (j, p, k) in zhpc_active else sp.Integer(0)
+
+qc = {i: (sp.symbols(f"qc_{i}") if i in zcu_active else sp.Integer(0)) for i in SI}
+qh = {j: (sp.symbols(f"qh_{j}") if j in zhu_active else sp.Integer(0)) for j in SJ}
+
+th = {(i, k): sp.symbols(f"th_{i}_{k}") for i in SI for k in SK}
+tc = {(j, k): sp.symbols(f"tc_{j}_{k}") for j in SJ for k in SK}
+
+# HP-side vars
+mhp  = {p: sp.symbols(f"mhp_{p}") for p in SP}
+mhph = {(i, p, k): sp.symbols(f"mhph_{i}_{p}_{k}") for i in SI for p in SP for k in ST}
+mhpc = {(j, p, k): sp.symbols(f"mhpc_{j}_{p}_{k}") for j in SJ for p in SP for k in ST}
+
+w = {}
+for p in SP:
+    if w_known[p] is None:
+        w[p] = sp.symbols(f"w_{p}")
+    else:
+        w[p] = sp.Float(w_known[p])
+
+# ============================================================
+# Build equations
+# ============================================================
+eqs = []
+labels = []
+
+# constrs2 — 热流总体平衡
+for i in SI:
+    lhs = sum(q[(i, j, k)] for j in SJ for k in ST) + sum(qhph[(i, p, k)] for p in SP for k in ST) + qc[i]
+    rhs = fh[i] * (thin[i] - thout[i])
+    eqs.append(sp.Eq(lhs, rhs, evaluate=False))
+    labels.append(f"constrs2(i={i})")
+
+# constrs3 — 冷流总体平衡
+for j in SJ:
+    lhs = sum(q[(i, j, k)] for i in SI for k in ST) + sum(qhpc[(j, p, k)] for p in SP for k in ST) + qh[j]
+    rhs = fc[j] * (tcout[j] - tcin[j])
+    eqs.append(sp.Eq(lhs, rhs, evaluate=False))
+    labels.append(f"constrs3(j={j})")
+
+# constrs18 — 热流级内平衡
+for i in SI:
+    for k in ST:
+        lhs = sum(q[(i, j, k)] for j in SJ) + sum(qhph[(i, p, k)] for p in SP)
+        rhs = fh[i] * (th[(i, k)] - th[(i, k + 1)])
+        eqs.append(sp.Eq(lhs, rhs, evaluate=False))
+        labels.append(f"constrs18(i={i},k={k})")
+
+# constrs19 — 冷流级内平衡
+for j in SJ:
+    for k in ST:
+        lhs = sum(q[(i, j, k)] for i in SI) + sum(qhpc[(j, p, k)] for p in SP)
+        rhs = fc[j] * (tc[(j, k)] - tc[(j, k + 1)])
+        eqs.append(sp.Eq(lhs, rhs, evaluate=False))
+        labels.append(f"constrs19(j={j},k={k})")
+
+# constrs40(=26) — 热流公用工程
+for i in SI:
+    eqs.append(sp.Eq(qc[i], fh[i] * (th[(i, NK - 1)] - thout[i]), evaluate=False))
+    labels.append(f"constrs40(i={i})")
+
+# constrs41(=27) — 冷流公用工程
+for j in SJ:
+    eqs.append(sp.Eq(qh[j], fc[j] * (tcout[j] - tc[(j, 0)]), evaluate=False))
+    labels.append(f"constrs41(j={j})")
+
+# ---------- Added 6 constraints ----------
+# constrs13
+for i in SI:
+    for p in SP:
+        for k in ST:
+            eqs.append(
+                sp.Eq(
+                    qhph[(i, p, k)],
+                    evap[p] * mhph[(i, p, k)] * (1 - hvap[p]),
+                    evaluate=False
+                )
+            )
+            labels.append(f"constrs13(i={i},p={p},k={k})")
+
+# constrs14
+for p in SP:
+    eqs.append(sp.Eq(mhp[p], sum(mhph[(i, p, k)] for i in SI for k in ST), evaluate=False))
+    labels.append(f"constrs14(p={p})")
+
+# constrs15
+for j in SJ:
+    for p in SP:
+        coef = cond[p] + chpp[p] * (thpcin[p] - thpca[p])
+        for k in ST:
+            eqs.append(sp.Eq(qhpc[(j, p, k)], coef * mhpc[(j, p, k)], evaluate=False))
+            labels.append(f"constrs15(j={j},p={p},k={k})")
+
+# constrs16
+for p in SP:
+    eqs.append(sp.Eq(mhp[p], sum(mhpc[(j, p, k)] for j in SJ for k in ST), evaluate=False))
+    labels.append(f"constrs16(p={p})")
+
+# constrs17
+for p in SP:
+    eqs.append(
+        sp.Eq(
+            sum(qhph[(i, p, k)] for i in SI for k in ST) + w[p],
+            sum(qhpc[(j, p, k)] for j in SJ for k in ST),
+            evaluate=False
+        )
+    )
+    labels.append(f"constrs17(p={p})")
+
+# constrs39: w = dhp*mhp
+#for p in SP:
+#    eqs.append(sp.Eq(w[p], dhp[p] * mhp[p], evaluate=False))
+#    labels.append(f"constrs39(p={p})")
+
+
+
+# ============================================================
+# Collect symbolic variables
+# ============================================================
+all_vars = []
+for container in (q, qhph, qhpc, qc, qh, th, tc, mhp, mhph, mhpc, w):
+    for v in container.values():
+        if isinstance(v, sp.Symbol):
+            all_vars.append(v)
+all_vars = sorted(set(all_vars), key=str)
+
+n_var = len(all_vars)
+n_eq = len(eqs)
+
+print("  方程明细")
+for name, eq in zip(labels, eqs):
+    diff = sp.simplify(eq.lhs - eq.rhs)
+    if diff != 0:
+        print(f"    {name}:  {eq.lhs} = {eq.rhs}")
+
+print(f"\n  方程总数 N_eq = {n_eq}")
+
+# ============================================================
+# Build coefficient matrix A
+# ============================================================
+A = sp.Matrix.zeros(n_eq, n_var)
+for eq_idx, eq in enumerate(eqs):
+    expr = sp.expand(eq.lhs - eq.rhs)
+    for var_idx, var in enumerate(all_vars):
+        coeff = expr.coeff(var)
+        if coeff != 0:
+            A[eq_idx, var_idx] = coeff
+
+rank = int(A.rank())
+dof = n_var - rank
+
+print(f"  独立变量数       = {n_var}")
+print(f"  独立方程数       = {rank}")
+print(f"  自由度           = {n_var} - {rank} = {dof}")
