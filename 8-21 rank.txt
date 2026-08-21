@@ -1,0 +1,83 @@
+import sympy as sp
+
+# ========= 1) Sets / data =========
+NI, NJ, NK, NP = 2, 2, 3, 1
+SI, SJ, SP, ST = range(NI), range(NJ), range(NP), range(NK - 1)
+
+thin  = [465.0, 410.0]
+thout = [400.0, 310.0]
+fh    = [80.1, 208.53]
+tcin  = [315.0, 315.0]
+tcout = [370.0, 400.0]
+fc    = [126.3, 213.6]
+
+# ========= 2) Active structure =========
+z_active    = {(0, 1, 0): 1.0, (1, 0, 0): 1.0}
+zhph_active = {(1, 0, 1): 1.0}
+zhpc_active = {(0, 0, 0): 1.0,(1, 0, 1): 1.0}
+zcu_active  = {1: 1.0}
+zhu_active  = {1: 1.0}   # HU存在于 j=1
+
+# ========= 3) Unknowns (核心只保留 q / qhph / qhpc / qc / qh / w) =========
+q = {(i, j, k): (sp.symbols(f"q_{i}_{j}_{k}") if (i, j, k) in z_active else sp.Integer(0))
+     for i in SI for j in SJ for k in ST}
+
+qhph = {(i, p, k): (sp.symbols(f"qhph_{i}_{p}_{k}") if (i, p, k) in zhph_active else sp.Integer(0))
+        for i in SI for p in SP for k in ST}
+
+qhpc = {(j, p, k): (sp.symbols(f"qhpc_{j}_{p}_{k}") if (j, p, k) in zhpc_active else sp.Integer(0))
+        for j in SJ for p in SP for k in ST}
+
+qc = {i: (sp.symbols(f"qc_{i}") if i in zcu_active else sp.Integer(0)) for i in SI}
+qh = {j: (sp.symbols(f"qh_{j}") if j in zhu_active else sp.Integer(0)) for j in SJ}
+w  = {p: sp.symbols(f"w_{p}") for p in SP}   # w未知
+
+# ========= 4) Minimal equations =========
+eqs, labels = [], []
+
+# constrs2: hot overall
+for i in SI:
+    lhs = sum(q[(i, j, k)] for j in SJ for k in ST) + sum(qhph[(i, p, k)] for p in SP for k in ST) + qc[i]
+    rhs = fh[i] * (thin[i] - thout[i])
+    eqs.append(sp.Eq(lhs, rhs, evaluate=False))
+    labels.append(f"constrs2(i={i})")
+
+# constrs3: cold overall
+for j in SJ:
+    lhs = sum(q[(i, j, k)] for i in SI for k in ST) + sum(qhpc[(j, p, k)] for p in SP for k in ST) + qh[j]
+    rhs = fc[j] * (tcout[j] - tcin[j])
+    eqs.append(sp.Eq(lhs, rhs, evaluate=False))
+    labels.append(f"constrs3(j={j})")
+
+# constrs17: HP balance
+for p in SP:
+    lhs = sum(qhph[(i, p, k)] for i in SI for k in ST) + w[p]
+    rhs = sum(qhpc[(j, p, k)] for j in SJ for k in ST)
+    eqs.append(sp.Eq(lhs, rhs, evaluate=False))
+    labels.append(f"constrs17(p={p})")
+
+# ========= 5) Build variable list ONLY from equations =========
+all_vars = sorted(set().union(*[eq.free_symbols for eq in eqs]), key=str)
+n_eq, n_var = len(eqs), len(all_vars)
+
+print("=== 方程 ===")
+for name, eq in zip(labels, eqs):
+    print(f"{name}: {eq.lhs} = {eq.rhs}")
+
+print(f"\nN_eq={n_eq}, N_var={n_var}")
+
+# ========= 6) Coefficient matrix rank / DOF =========
+A = sp.Matrix.zeros(n_eq, n_var)
+for r, eq in enumerate(eqs):
+    expr = sp.expand(eq.lhs - eq.rhs)
+    for c, v in enumerate(all_vars):
+        cc = expr.coeff(v)
+        if cc != 0:
+            A[r, c] = cc
+
+rank = int(A.rank())
+dof = n_var - rank
+
+print(f"rank={rank}")
+print(f"DOF={dof}")
+
