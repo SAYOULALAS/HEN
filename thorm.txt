@@ -1,0 +1,382 @@
+import CoolProp.CoolProp as CP
+
+# 设定工质和蒸发温度
+#fluid = 'R245fa'
+#T_evap = 120 + 273.15  # 100°C，转换为K
+
+# 获取汽化潜热
+#h_vap = CP.PropsSI('H', 'T', T_evap, 'Q', 1, fluid)  # 饱和气态焓
+#h_liq = CP.PropsSI('H', 'T', T_evap, 'Q', 0, fluid)  # 饱和液态焓
+#gamma = h_vap - h_liq  # 汽化潜热 (J/kg)
+
+#print(f"汽化潜热 = {gamma/1000:.2f} kJ/kg")
+
+def calc_hp_params(fluid, T_evap_C, T_cond_C):
+    """
+    计算热泵工质参数
+    返回: evap(汽化潜热 kJ/kg), hvap(干度)
+    """
+    T_evap = T_evap_C + 273.15
+    T_cond = T_cond_C + 273.15
+
+    # 汽化潜热
+    h_vap = CP.PropsSI('H', 'T', T_evap, 'Q', 1, fluid)  # J/kg
+    h_liq_evap = CP.PropsSI('H', 'T', T_evap, 'Q', 0, fluid)  # J/kg
+    gamma = (h_vap - h_liq_evap) / 1000  # kJ/kg
+
+    # 节流前（冷凝温度下饱和液态）焓值
+    h_liq_cond = CP.PropsSI('H', 'T', T_cond, 'Q', 0, fluid)  # J/kg
+
+    # 干度
+    x = (h_liq_cond - h_liq_evap) / (h_vap - h_liq_evap)
+
+    return {
+        'evap': gamma,  # 汽化潜热 (kJ/kg)
+        'hvap': x,  # 干度
+        'P_evap': CP.PropsSI('P', 'T', T_evap, 'Q', 0, fluid) / 1e5,  # 蒸发压力 (bar)
+        'P_cond': CP.PropsSI('P', 'T', T_cond, 'Q', 0, fluid) / 1e5,  # 冷凝压力 (bar)
+    }
+
+
+# ：R245fa，蒸发100°C，冷凝150°C
+params = calc_hp_params('R245fa', 120, 150)
+print(f"汽化潜热: {params['evap']:.1f} kJ/kg")
+print(f"干度: {params['hvap']:.3f}")
+print(f"蒸发压力: {params['P_evap']:.1f} bar")
+print(f"冷凝压力: {params['P_cond']:.1f} bar")
+
+
+
+def calc_condenser_params(fluid, T_cond_C):
+    """
+    计算冷凝器侧工质参数（适用于公式15中的 lambda_c^p）
+    """
+    T_cond = T_cond_C + 273.15
+
+    # 冷凝温度下的汽化潜热（这才是公式中 lambda_c^p）
+    h_vap_cond = CP.PropsSI('H', 'T', T_cond, 'Q', 1, fluid)  # 饱和蒸汽焓
+    h_liq_cond = CP.PropsSI('H', 'T', T_cond, 'Q', 0, fluid)  # 饱和液态焓
+    gamma_cond = (h_vap_cond - h_liq_cond) / 1000  # kJ/kg
+
+    # 压缩机出口过热蒸汽比热 Cp_hp_p（需要知道压缩后实际温度 T_comp_out）
+    # 假设压缩机出口温度为 T_cond + 过热度，这里示例为 160°C
+    T_comp_out = 170 + 273.15  # 需要根据实际压缩过程确定
+    P_cond = CP.PropsSI('P', 'T', T_cond, 'Q', 0, fluid)  # 冷凝压力
+    Cp_gas = CP.PropsSI('C', 'T', T_comp_out, 'P', P_cond, fluid) / 1000  # kJ/(kg·K)
+
+    return {
+        'lambda_cond': gamma_cond,  # 冷凝潜热 (kJ/kg) ← 公式中的 λ_c^p
+        'Cp_gas': Cp_gas,  # 过热蒸汽比热 (kJ/kg·K) ← 公式中的 Cp_hp_p
+        'P_cond_bar': P_cond / 1e5,  # 冷凝压力 (bar)
+        'h_liq_cond': h_liq_cond / 1000  # 冷凝温度下饱和液态焓 (kJ/kg)
+    }
+
+# 计算
+params_cond = calc_condenser_params('R245fa', 150)
+print(f"冷凝潜热 (λ_c): {params_cond['lambda_cond']:.1f} kJ/kg")
+print(f"过热蒸汽比热 (Cp_gas): {params_cond['Cp_gas']:.3f} kJ/kg·K")
+print(f"冷凝压力: {params_cond['P_cond_bar']:.1f} bar")
+
+
+
+
+def calc_compressor_power(fluid, T_evap_C, T_cond_C, m_dot, eta_isentropic=0.85):
+    """
+    严格计算压缩机功耗
+    """
+    T_evap = T_evap_C + 273.15
+    T_cond = T_cond_C + 273.15
+
+    # 状态1：蒸发压力下的饱和蒸汽
+    P_evap = CP.PropsSI('P', 'T', T_evap, 'Q', 1, fluid)
+    h1 = CP.PropsSI('H', 'T', T_evap, 'Q', 1, fluid)
+    s1 = CP.PropsSI('S', 'T', T_evap, 'Q', 1, fluid)
+    v1 = CP.PropsSI('V', 'T', T_evap, 'Q', 1, fluid)  # 比容
+
+    # 状态2s：等熵压缩至冷凝压力
+    P_cond = CP.PropsSI('P', 'T', T_cond, 'Q', 0, fluid)
+    h2s = CP.PropsSI('H', 'P', P_cond, 'S', s1, fluid)
+
+    # 状态2：实际压缩出口
+    h2 = h1 + (h2s - h1) / eta_isentropic
+
+    # 严格功
+    W_strict = m_dot * (h2 - h1) / 1000  # kW
+
+    print(f"压缩机功: {W_strict} KW")
+
+    return W_strict
+
+
+# 示例
+W = calc_compressor_power('R245fa', 120, 150, 1.0, 0.85)
+
+
+'''
+fluid = 'R245fa'
+T_evap = 120 + 273.15
+
+
+print("=" * 50)
+print("方法1：直接指定温度+干度")
+
+# 蒸发器入口（两相，干度0.544）
+T_in = T_evap  # 两相区温度 = 饱和温度
+x_in = 0.544
+h_in = CP.PropsSI('H', 'T', T_in, 'Q', x_in, fluid)  # ✅ T+Q 是有效组合
+P_in = CP.PropsSI('P', 'T', T_in, 'Q', x_in, fluid)
+
+# 蒸发器出口（饱和蒸汽，干度1.0）
+T_out = T_evap
+x_out = 1.0
+h_out = CP.PropsSI('H', 'T', T_out, 'Q', x_out, fluid)  # ✅ T+Q 是有效组合
+P_out = CP.PropsSI('P', 'T', T_out, 'Q', x_out, fluid)
+
+print(f"入口: T = {T_in - 273.15:.1f}°C, x = {x_in:.1f}, h = {h_in/1000:.1f} kJ/kg")
+print(f"出口: T = {T_out - 273.15:.1f}°C, x = {x_out:.1f}, h = {h_out/1000:.1f} kJ/kg")
+print(f"蒸发吸热量: Δh = {(h_out - h_in)/1000:.1f} kJ/kg")
+'''
+
+'''
+import CoolProp.CoolProp as CP
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def refrigeration_cycle(fluid, T_evap_C, T_cond_C, m_dot=1.0, eta_isentropic=0.80):
+    """
+    模拟逆Rankine循环（蒸汽压缩制冷循环）
+
+    参数:
+        fluid: 工质名称（如 'R245fa'）
+        T_evap_C: 蒸发温度 (°C)
+        T_cond_C: 冷凝温度 (°C)
+        m_dot: 质量流量 (kg/s)，默认1.0
+        eta_isentropic: 压缩机等熵效率 (-)，默认0.80
+
+    返回:
+        dict: 包含各状态点参数和循环性能
+    """
+
+    # 转换为开尔文
+    T_evap = T_evap_C + 273.15
+    T_cond = T_cond_C + 273.15
+
+    # ========== 状态点1：压缩机入口（蒸发器出口，饱和蒸汽） ==========
+    P_evap = CP.PropsSI('P', 'T', T_evap, 'Q', 1, fluid)  # 蒸发压力 (Pa)
+    h1 = CP.PropsSI('H', 'T', T_evap, 'Q', 1, fluid)  # 饱和蒸汽焓 (J/kg)
+    s1 = CP.PropsSI('S', 'T', T_evap, 'Q', 1, fluid)  # 饱和蒸汽熵 (J/kg·K)
+    T1 = T_evap
+
+    print(f"状态点1 - 压缩机入口（饱和蒸汽）")
+    print(f"  T1 = {T1 - 273.15:.1f} °C, P1 = {P_evap / 1e5:.2f} bar")
+    print(f"  h1 = {h1 / 1000:.1f} kJ/kg, s1 = {s1 / 1000:.3f} kJ/kg·K\n")
+
+    # ========== 状态点2s：等熵压缩出口 ==========
+    P_cond = CP.PropsSI('P', 'T', T_cond, 'Q', 0, fluid)  # 冷凝压力 (Pa)
+
+    # 等熵压缩: s2s = s1, P2 = P_cond
+    s2s = s1
+    h2s = CP.PropsSI('H', 'P', P_cond, 'S', s2s, fluid)  # 等熵压缩出口焓 (J/kg)
+    T2s = CP.PropsSI('T', 'P', P_cond, 'S', s2s, fluid)  # 等熵压缩出口温度 (K)
+
+    # ========== 状态点2：实际压缩出口 ==========
+    # 等熵效率定义: eta = (h2s - h1) / (h2 - h1)
+    h2 = h1 + (h2s - h1) / eta_isentropic
+    T2 = CP.PropsSI('T', 'P', P_cond, 'H', h2, fluid)
+    s2 = CP.PropsSI('S', 'P', P_cond, 'H', h2, fluid)
+
+    print(f"状态点2 - 压缩机出口（过热蒸汽）")
+    print(f"  T2 = {T2 - 273.15:.1f} °C, P2 = {P_cond / 1e5:.2f} bar")
+    print(f"  h2 = {h2 / 1000:.1f} kJ/kg, s2 = {s2 / 1000:.3f} kJ/kg·K")
+    print(f"  过热度 = {T2 - T_cond:.1f} °C\n")
+
+    # ========== 状态点3：冷凝器出口（饱和液体） ==========
+    h3 = CP.PropsSI('H', 'T', T_cond, 'Q', 0, fluid)  # 饱和液态焓 (J/kg)
+    s3 = CP.PropsSI('S', 'T', T_cond, 'Q', 0, fluid)  # 饱和液态熵 (J/kg·K)
+    T3 = T_cond
+    P3 = P_cond
+
+    print(f"状态点3 - 冷凝器出口（饱和液体）")
+    print(f"  T3 = {T3 - 273.15:.1f} °C, P3 = {P3 / 1e5:.2f} bar")
+    print(f"  h3 = {h3 / 1000:.1f} kJ/kg, s3 = {s3 / 1000:.3f} kJ/kg·K\n")
+
+    # ========== 状态点4：节流阀出口（两相区） ==========
+    # 等焓节流: h4 = h3
+    h4 = h3
+    # 计算干度（两相区）
+    h_vap_evap = CP.PropsSI('H', 'T', T_evap, 'Q', 1, fluid)
+    h_liq_evap = CP.PropsSI('H', 'T', T_evap, 'Q', 0, fluid)
+    x4 = (h4 - h_liq_evap) / (h_vap_evap - h_liq_evap)
+
+    P4 = P_evap
+    T4 = T_evap
+    s4 = CP.PropsSI('S', 'P', P_evap, 'H', h4, fluid) if 0 < x4 < 1 else \
+        CP.PropsSI('S', 'P', P_evap, 'Q', 0, fluid) + x4 * (
+                    CP.PropsSI('S', 'P', P_evap, 'Q', 1, fluid) - CP.PropsSI('S', 'P', P_evap, 'Q', 0, fluid))
+
+    print(f"状态点4 - 节流阀出口（两相区）")
+    print(f"  T4 = {T4 - 273.15:.1f} °C, P4 = {P4 / 1e5:.2f} bar")
+    print(f"  h4 = {h4 / 1000:.1f} kJ/kg, s4 = {s4 / 1000:.3f} kJ/kg·K")
+    print(f"  干度 x4 = {x4:.4f}\n")
+
+    # ========== 循环性能计算（以1 kg/s为基准） ==========
+    # 压缩机功耗 (kW)
+    W_dot = m_dot * (h2 - h1) / 1000  # 正值为输入功
+
+    # 冷凝器放热量 (kW) 
+    # 注意：实际制冷循环中，冷凝器放热 = 蒸发器吸热 + 压缩机功
+    Q_cond_dot = m_dot * (h2 - h3) / 1000
+
+    # 蒸发器吸热量 (kW)
+    Q_evap_dot = m_dot * (h1 - h4) / 1000
+
+    # 性能系数 COP (制冷)
+    COP = Q_evap_dot / W_dot if W_dot > 0 else 0
+
+    # 性能系数 COP (热泵)
+    COP_hp = Q_cond_dot / W_dot if W_dot > 0 else 0
+
+    print("=" * 50)
+    print(f"循环性能 (质量流量 = {m_dot} kg/s)")
+    print(f"  蒸发器吸热量 Q_evap = {Q_evap_dot:.2f} kW")
+    print(f"  压缩机功耗 W = {W_dot:.2f} kW")
+    print(f"  冷凝器放热量 Q_cond = {Q_cond_dot:.2f} kW")
+    print(f"  COP (制冷) = {COP:.3f}")
+    print(f"  COP (热泵) = {COP_hp:.3f}")
+    print("=" * 50)
+
+    # ========== 绘制T-S图和P-H图 ==========
+    plot_cycles(fluid, T_evap, T_cond,
+                [(T1, s1), (T2, s2), (T3, s3), (T4, s4)],
+                [(h1, s1), (h2, s2), (h3, s3), (h4, s4)])
+
+    return {
+        'state_points': {
+            '1': {'T': T1, 'P': P_evap, 'h': h1, 's': s1},
+            '2': {'T': T2, 'P': P_cond, 'h': h2, 's': s2},
+            '3': {'T': T3, 'P': P_cond, 'h': h3, 's': s3},
+            '4': {'T': T4, 'P': P_evap, 'h': h4, 's': s4}
+        },
+        'performance': {
+            'Q_evap': Q_evap_dot,
+            'W_comp': W_dot,
+            'Q_cond': Q_cond_dot,
+            'COP': COP,
+            'COP_hp': COP_hp,
+            'x4': x4
+        }
+    }
+
+
+def plot_cycles(fluid, T_evap, T_cond, ts_points, hs_points):
+    """
+    绘制T-S图和P-H图
+    """
+    # 生成饱和曲线
+    T_sat = np.linspace(T_evap, T_cond, 200)
+    s_liq_sat = []
+    s_vap_sat = []
+    h_liq_sat = []
+    h_vap_sat = []
+
+    for T in T_sat:
+        try:
+            s_liq = CP.PropsSI('S', 'T', T, 'Q', 0, fluid) / 1000
+            s_vap = CP.PropsSI('S', 'T', T, 'Q', 1, fluid) / 1000
+            h_liq = CP.PropsSI('H', 'T', T, 'Q', 0, fluid) / 1000
+            h_vap = CP.PropsSI('H', 'T', T, 'Q', 1, fluid) / 1000
+            s_liq_sat.append(s_liq)
+            s_vap_sat.append(s_vap)
+            h_liq_sat.append(h_liq)
+            h_vap_sat.append(h_vap)
+        except:
+            break
+
+    # 提取状态点
+    T1, s1 = ts_points[0]
+    T2, s2 = ts_points[1]
+    T3, s3 = ts_points[2]
+    T4, s4 = ts_points[3]
+
+    h1, s1_h = hs_points[0]
+    h2, s2_h = hs_points[1]
+    h3, s3_h = hs_points[2]
+    h4, s4_h = hs_points[3]
+
+    # ===== T-S图 =====
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # 饱和曲线
+    ax1.plot(s_liq_sat, T_sat - 273.15, 'b-', linewidth=2, label='饱和液体')
+    ax1.plot(s_vap_sat, T_sat - 273.15, 'r-', linewidth=2, label='饱和蒸汽')
+
+    # 循环过程线（简化线性连接）
+    s_points = np.array([s1 / 1000, s2 / 1000, s3 / 1000, s4 / 1000, s1 / 1000])
+    T_points = np.array([T1 - 273.15, T2 - 273.15, T3 - 273.15, T4 - 273.15, T1 - 273.15])
+    ax1.plot(s_points, T_points, 'g-', linewidth=2.5, marker='o', markersize=8)
+
+    # 标注状态点
+    labels = ['1', '2', '3', '4']
+    for i, (s, T) in enumerate(zip(s_points[:4], T_points[:4])):
+        ax1.annotate(labels[i], (s, T), xytext=(5, 5), textcoords='offset points',
+                     fontsize=12, fontweight='bold')
+
+    ax1.set_xlabel('熵 s (kJ/kg·K)', fontsize=12)
+    ax1.set_ylabel('温度 T (°C)', fontsize=12)
+    ax1.set_title(f'T-S 图 - {fluid}\n蒸发 {T_evap - 273.15:.0f}°C, 冷凝 {T_cond - 273.15:.0f}°C', fontsize=14)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+
+    # ===== P-H图（压焓图） =====
+    ax2.plot(h_liq_sat, np.log10(np.array([CP.PropsSI('P', 'T', T, 'Q', 0, fluid) / 1e5 for T in T_sat])),
+             'b-', linewidth=2, label='饱和液体')
+    ax2.plot(h_vap_sat, np.log10(np.array([CP.PropsSI('P', 'T', T, 'Q', 1, fluid) / 1e5 for T in T_sat])),
+             'r-', linewidth=2, label='饱和蒸汽')
+
+    # 循环过程线
+    h_points = np.array([h1 / 1000, h2 / 1000, h3 / 1000, h4 / 1000, h1 / 1000])
+    logP_points = np.array([np.log10(P1 / 1e5) for P1 in
+                            [CP.PropsSI('P', 'H', h, 'S', s, fluid) if i == 0 else
+                             CP.PropsSI('P', 'H', h, 'S', s, fluid) for i, (h, s) in
+                             enumerate(zip(h_points[:4], s_points[:4]))]])
+    # 简化：直接用状态点压力
+    logP1 = np.log10(CP.PropsSI('P', 'T', T_evap, 'Q', 1, fluid) / 1e5)
+    logP2 = np.log10(CP.PropsSI('P', 'T', T_cond, 'Q', 0, fluid) / 1e5)
+    logP3 = logP2
+    logP4 = logP1
+    logP_points = [logP1, logP2, logP3, logP4, logP1]
+
+    ax2.plot(h_points, logP_points, 'g-', linewidth=2.5, marker='o', markersize=8)
+
+    for i, (h, logP) in enumerate(zip(h_points[:4], logP_points[:4])):
+        ax2.annotate(labels[i], (h, logP), xytext=(5, 5), textcoords='offset points',
+                     fontsize=12, fontweight='bold')
+
+    ax2.set_xlabel('焓 h (kJ/kg)', fontsize=12)
+    ax2.set_ylabel('log(压力 P/bar)', fontsize=12)
+    ax2.set_title(f'P-H 图 - {fluid}', fontsize=14)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.savefig('refrigeration_cycle.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+# ========== 主程序 ==========
+if __name__ == "__main__":
+    # 模拟R245fa制冷循环
+    fluid = 'R245fa'
+    T_evap = 120  # °C
+    T_cond = 150  # °C
+    m_dot = 1.0  # kg/s
+
+    print(f"\n{'=' * 60}")
+    print(f"R245fa 制冷循环模拟")
+    print(f"蒸发温度: {T_evap}°C, 冷凝温度: {T_cond}°C")
+    print(f"质量流量: {m_dot} kg/s")
+    print(f"{'=' * 60}\n")
+
+    results = refrigeration_cycle(fluid, T_evap, T_cond, m_dot, eta_isentropic=0.85)
+'''
